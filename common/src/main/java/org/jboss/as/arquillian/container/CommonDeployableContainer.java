@@ -19,7 +19,6 @@ import static org.jboss.as.arquillian.container.Authentication.getCallbackHandle
 
 import java.io.IOException;
 import java.net.URI;
-import java.security.GeneralSecurityException;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.naming.Context;
@@ -45,10 +44,6 @@ import org.jboss.dmr.Property;
 import org.jboss.logging.Logger;
 import org.jboss.shrinkwrap.api.Archive;
 import org.jboss.shrinkwrap.descriptor.api.Descriptor;
-import org.wildfly.client.config.ConfigXMLParseException;
-import org.wildfly.plugin.core.ContextualModelControllerClient;
-import org.wildfly.security.auth.client.AuthenticationContext;
-import org.wildfly.security.auth.client.ElytronXmlParser;
 
 /**
  * A JBossAS deployable container
@@ -76,7 +71,7 @@ public abstract class CommonDeployableContainer<T extends CommonContainerConfigu
 
     private final StandaloneDelegateProvider mccProvider = new StandaloneDelegateProvider();
     private ContainerDescription containerDescription = null;
-    private AuthenticationContext authenticationContext = null;
+    private URI authenticationConfig = null;
 
     @Override
     public ProtocolDescription getDefaultProtocol() {
@@ -86,19 +81,20 @@ public abstract class CommonDeployableContainer<T extends CommonContainerConfigu
     @Override
     public void setup(T config) {
         containerConfig = config;
-        final String wildflyConfigUri = containerConfig.getWildflyConfig();
+        final String authenticationConfig = containerConfig.getAuthenticationConfig();
 
         // Check for an Elytron configuration
-        if (wildflyConfigUri != null) {
-            try {
-                authenticationContext = ElytronXmlParser.parseAuthenticationClientConfiguration(URI.create(wildflyConfigUri)).create();
+        if (authenticationConfig != null) {
+            /*try {
+                authenticationContext = ElytronXmlParser.parseAuthenticationClientConfiguration(URI.create(authenticationConfig)).create();
             } catch (ConfigXMLParseException | GeneralSecurityException e) {
                 throw new RuntimeException("Failed to configure authentication.", e);
-            }
+            }*/
+            this.authenticationConfig = URI.create(authenticationConfig);
         }
 
         final ManagementClient client = new ManagementClient(new DelegatingModelControllerClient(mccProvider),
-                containerConfig.getManagementAddress(), containerConfig.getManagementPort(), containerConfig.getManagementProtocol(), authenticationContext);
+                containerConfig.getManagementAddress(), containerConfig.getManagementPort(), containerConfig.getManagementProtocol(), this.authenticationConfig);
         managementClient.set(client);
 
         archiveDeployer.set(new ArchiveDeployer(client));
@@ -110,24 +106,17 @@ public abstract class CommonDeployableContainer<T extends CommonContainerConfigu
         final ModelControllerClientConfiguration.Builder clientConfigBuilder = new ModelControllerClientConfiguration.Builder()
                 .setProtocol(containerConfig.getManagementProtocol())
                 .setHostName(containerConfig.getManagementAddress())
-                .setPort(containerConfig.getManagementPort());
+                .setPort(containerConfig.getManagementPort())
+                .setAuthenticationConfigUri(authenticationConfig);
 
         // Check for username and password authentication
-        if(containerConfig.getUsername() != null) {
+        if (containerConfig.getUsername() != null) {
             Authentication.username = containerConfig.getUsername();
             Authentication.password = containerConfig.getPassword();
             clientConfigBuilder.setHandler(getCallbackHandler());
         }
 
-        final ModelControllerClient modelControllerClient;
-
-        // Check for an Elytron configuration
-        if (authenticationContext != null) {
-            modelControllerClient = new ContextualModelControllerClient(ModelControllerClient.Factory.create(clientConfigBuilder.build()), authenticationContext);
-        } else {
-            modelControllerClient = ModelControllerClient.Factory.create(clientConfigBuilder.build());
-        }
-        mccProvider.setDelegate(modelControllerClient);
+        mccProvider.setDelegate(ModelControllerClient.Factory.create(clientConfigBuilder.build()));
 
         try {
             final Properties jndiProps = new Properties();
