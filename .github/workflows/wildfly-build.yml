@@ -31,7 +31,7 @@ jobs:
         with:
           java-version: 11
       - name: Build WildFly
-        run: 'mvn clean install -DskipTests -Dcheckstyle.skip=true -Denforcer.skip=true -pl ee-feature-pack/galleon-feature-pack/ -am'
+        run: 'mvn clean install -DskipTests -Dcheckstyle.skip=true -Denforcer.skip=true -Dskip.preview'
       - id: version
         run: echo "::set-output name=wildfly-version::$(mvn -B help:evaluate -Dexpression=project.version -pl . | grep -v '^\[')"
       - uses: actions/upload-artifact@v2
