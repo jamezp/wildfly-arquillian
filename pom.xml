@@ -264,6 +264,7 @@
         <module>container-remote-domain</module>
         <module>container-managed-domain</module>
         <module>integration-tests</module>
+        <module>subsystem</module>
     </modules>
 
     <packaging>pom</packaging>
