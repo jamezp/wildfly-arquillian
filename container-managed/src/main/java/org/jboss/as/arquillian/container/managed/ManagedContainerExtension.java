@@ -22,5 +22,7 @@ public class ManagedContainerExtension extends CommonContainerExtension {
         super.register(builder);
         builder.service(DeployableContainer.class, ManagedDeployableContainer.class);
         builder.service(ResourceProvider.class, AppClientProvider.class);
+        builder.observer(SimpleTypeObserver.class);
+        builder.service(ResourceProvider.class, SimpleTypeProvider.class);
     }
 }
