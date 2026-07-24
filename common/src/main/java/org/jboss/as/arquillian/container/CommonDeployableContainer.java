@@ -10,6 +10,8 @@ import java.io.IOException;
 import java.net.URI;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 import javax.naming.Context;
 import javax.naming.InitialContext;
@@ -45,8 +47,15 @@ import org.wildfly.plugin.tools.server.StandaloneManager;
  */
 public abstract class CommonDeployableContainer<T extends CommonContainerConfiguration> implements DeployableContainer<T> {
 
+    private enum State {
+        STOPPED,
+        STARTED,
+    }
+
     private static final String JBOSS_URL_PKG_PREFIX = "org.jboss.ejb.client.naming";
     private static final String READ_OPERATION_DESCRIPTION_OPERATION = "read-operation-description";
+    private static final Lock LOCK = new ReentrantLock();
+    private static State STATE = State.STOPPED;
 
     private T containerConfig;
 
@@ -79,69 +88,85 @@ public abstract class CommonDeployableContainer<T extends CommonContainerConfigu
 
     @Override
     public void setup(T config) {
-        containerConfig = config;
-        final String authenticationConfig = containerConfig.getAuthenticationConfig();
+        LOCK.lock();
+        try {
+            containerConfig = config;
+            final String authenticationConfig = containerConfig.getAuthenticationConfig();
 
-        // Check for an Elytron configuration
-        if (authenticationConfig != null) {
-            this.authenticationConfig = URI.create(authenticationConfig);
+            // Check for an Elytron configuration
+            if (authenticationConfig != null) {
+                this.authenticationConfig = URI.create(authenticationConfig);
+            }
+
+            final ManagementClient client = new ManagementClient(new DelegatingModelControllerClient(mccProvider),
+                    containerConfig);
+            managementClient = client;
+            managementClientProducer.set(client);
+
+            archiveDeployer.set(new ArchiveDeployer(client, config.getDeploymentFailurePattern()));
+        } finally {
+            LOCK.unlock();
         }
-
-        final ManagementClient client = new ManagementClient(new DelegatingModelControllerClient(mccProvider), containerConfig);
-        managementClient = client;
-        managementClientProducer.set(client);
-
-        archiveDeployer.set(new ArchiveDeployer(client, config.getDeploymentFailurePattern()));
     }
 
     @Override
     public final void start() throws LifecycleException {
-        // Create a client configuration builder from the container configuration
-        final ModelControllerClientConfiguration.Builder clientConfigBuilder = new ModelControllerClientConfiguration.Builder()
-                .setProtocol(containerConfig.getManagementProtocol())
-                .setHostName(containerConfig.getManagementAddress())
-                .setPort(containerConfig.getManagementPort())
-                .setAuthenticationConfigUri(authenticationConfig);
-
-        // only "copy" the timeout if one was set.
-        final int connectionTimeout = containerConfig.getConnectionTimeout();
-        if (connectionTimeout > 0) {
-            clientConfigBuilder.setConnectionTimeout(connectionTimeout);
-        }
-
-        // Check for username and password authentication
-        if (containerConfig.getUsername() != null) {
-            Authentication.username = containerConfig.getUsername();
-            Authentication.password = containerConfig.getPassword();
-            clientConfigBuilder.setHandler(getCallbackHandler());
-        }
-        mccProvider.setDelegate(ModelControllerClient.Factory.create(clientConfigBuilder.build()));
-
-        // If we are not a CommonManagedDeployableContainer we still need the ServerManager
-        if (!(this instanceof CommonManagedDeployableContainer)) {
-            // Set up the server manager attempting to discover the process for monitoring purposes. We need the
-            // server manager regardless of whether we are in charge of the lifecycle or not.
-            final StandaloneManager serverManager = ServerManager.builder()
-                    .client(getManagementClient().getControllerClient())
-                    // Note this won't work on Windows, but should work on other platforms
-                    .process(ServerManager.findProcess().orElse(null))
-                    .standalone();
-            serverManagerProducer.set(serverManager.asManaged());
-        }
-
+        LOCK.lock();
         try {
-            final Properties jndiProps = new Properties();
-            jndiProps.setProperty(Context.URL_PKG_PREFIXES, JBOSS_URL_PKG_PREFIX);
-            jndiContext.set(new InitialContext(jndiProps));
-        } catch (final NamingException ne) {
-            throw new LifecycleException("Could not set JNDI Naming Context", ne);
-        }
+            if (STATE == State.STARTED) {
+                return;
+            }
+            // Create a client configuration builder from the container configuration
+            final ModelControllerClientConfiguration.Builder clientConfigBuilder = new ModelControllerClientConfiguration.Builder()
+                    .setProtocol(containerConfig.getManagementProtocol())
+                    .setHostName(containerConfig.getManagementAddress())
+                    .setPort(containerConfig.getManagementPort())
+                    .setAuthenticationConfigUri(authenticationConfig);
 
-        try {
-            startInternal();
-        } catch (LifecycleException e) {
-            safeCloseClient();
-            throw e;
+            // only "copy" the timeout if one was set.
+            final int connectionTimeout = containerConfig.getConnectionTimeout();
+            if (connectionTimeout > 0) {
+                clientConfigBuilder.setConnectionTimeout(connectionTimeout);
+            }
+
+            // Check for username and password authentication
+            if (containerConfig.getUsername() != null) {
+                Authentication.username = containerConfig.getUsername();
+                Authentication.password = containerConfig.getPassword();
+                clientConfigBuilder.setHandler(getCallbackHandler());
+            }
+            mccProvider.setDelegate(ModelControllerClient.Factory.create(clientConfigBuilder.build()));
+
+            // If we are not a CommonManagedDeployableContainer we still need the ServerManager
+            if (!(this instanceof CommonManagedDeployableContainer)) {
+                // Set up the server manager attempting to discover the process for monitoring purposes. We need the
+                // server manager regardless of whether we are in charge of the lifecycle or not.
+                final StandaloneManager serverManager = ServerManager.builder()
+                        .client(getManagementClient().getControllerClient())
+                        // Note this won't work on Windows, but should work on other platforms
+                        .process(ServerManager.findProcess().orElse(null))
+                        .standalone();
+                serverManagerProducer.set(serverManager.asManaged());
+            }
+
+            try {
+                final Properties jndiProps = new Properties();
+                jndiProps.setProperty(Context.URL_PKG_PREFIXES, JBOSS_URL_PKG_PREFIX);
+                jndiContext.set(new InitialContext(jndiProps));
+            } catch (final NamingException ne) {
+                throw new LifecycleException("Could not set JNDI Naming Context", ne);
+            }
+
+            try {
+                startInternal();
+                STATE = State.STARTED;
+            } catch (LifecycleException e) {
+                safeCloseClient();
+                STATE = State.STOPPED;
+                throw e;
+            }
+        } finally {
+            LOCK.unlock();
         }
     }
 
@@ -149,10 +174,19 @@ public abstract class CommonDeployableContainer<T extends CommonContainerConfigu
 
     @Override
     public final void stop() throws LifecycleException {
+        LOCK.lock();
         try {
-            stopInternal(null);
+            if (STATE != State.STARTED) {
+                return;
+            }
+            try {
+                stopInternal(null);
+            } finally {
+                STATE = State.STOPPED;
+                safeCloseClient();
+            }
         } finally {
-            safeCloseClient();
+            LOCK.unlock();
         }
     }
 
